@@ -252,6 +252,15 @@ Logic analyzer screenshot:
 
 ---
 
+## Homebridge Integration
+
+A companion Homebridge plugin is available for exposing the ESP32/Balboa integration to Apple Home:
+
+[homebridge-balboa-esp32](https://github.com/sixer-fixer/homebridge-balboa-esp32)
+
+The plugin connects to the ESPHome device and exposes the hot tub as a grouped Apple Home accessory, including temperature control, heater status, jets, and lighting.
+
+---
 
 ## Other Balboa projects
 
