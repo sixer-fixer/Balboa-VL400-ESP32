@@ -105,12 +105,19 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   uint8_t stable_mode_ = 0;
   static constexpr uint8_t MODE_STABLE_THRESHOLD = 3;
 
-  // Filter cycle text sensor and state (F + digit)
+  // Filter cycle text sensor and state (F2 / F4 / F6 / F8 / FC)
   esphome::text_sensor::TextSensor *filter_cycle_text_sensor_ = nullptr;
   std::string last_filter_cycle_ = "";
   std::string candidate_filter_cycle_ = "";
   uint8_t stable_filter_cycle_ = 0;
   static constexpr uint8_t FILTER_STABLE_THRESHOLD = 3;
+
+  // Filter frequency text sensor and state (2C / 1d / 1n)
+  esphome::text_sensor::TextSensor *filter_frequency_text_sensor_ = nullptr;
+  std::string last_filter_frequency_ = "";
+  std::string candidate_filter_frequency_ = "";
+  uint8_t stable_filter_frequency_ = 0;
+  static constexpr uint8_t FILTER_FREQUENCY_STABLE_THRESHOLD = 3;
 
   static constexpr uint32_t HEARTBEAT_MS = 30000;  // heartbeat every 30s (publish if unchanged)
   // Gap threshold (ms) to consider the start of a new frame (use ~15ms to match ~19ms observed gap)
@@ -144,6 +151,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
   void set_error_text_sensor(esphome::text_sensor::TextSensor *s) { error_text_sensor_ = s; }
   void set_spa_mode_text_sensor(esphome::text_sensor::TextSensor *s) { spa_mode_text_sensor_ = s; }
   void set_filter_cycle_text_sensor(esphome::text_sensor::TextSensor *s) { filter_cycle_text_sensor_ = s; }
+  void set_filter_frequency_text_sensor(esphome::text_sensor::TextSensor *s) { filter_frequency_text_sensor_ = s; }
 
   // Binary sensor setters
   void set_heater_sensor(esphome::binary_sensor::BinarySensor *s) { heater_sensor_ = s; }
@@ -342,7 +350,7 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     }
     portEXIT_CRITICAL(&spinlock_);
     if (partials > 0) {
-      ESP_LOGW(TAG, "Dropped %u partial/incomplete frames (gaps before 21 bits)", partials);
+      ESP_LOGD(TAG, "Dropped %u partial/incomplete frames (gaps before 21 bits)", partials);
     }
 
     // If no new frame, allow heartbeat publishes of last known value (only if last frame was valid)
@@ -491,11 +499,25 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
                         (c2_hb == 'E' && c3_hb == 'c') ||
                         (c2_hb == 'S' && c3_hb == 'L');
 
+      // Recognize filter menu displays during heartbeat processing
+      bool is_filter_cycle_hb =
+          (c2_hb == 'F' &&
+           (digit3 == 2 || digit3 == 4 || digit3 == 6 || digit3 == 8)) ||
+          (c2_hb == 'F' && (c3_hb == 'C' || c3_hb == 'c'));
+
+      bool is_filter_frequency_hb =
+          (digit2 == 2 && (c3_hb == 'C' || c3_hb == 'c')) ||
+          (digit2 == 1 && c3_hb == 'd') ||
+          (digit2 == 1 && c3_hb == 'n');
+
       // Publish mode heartbeat
       if (spa_mode_text_sensor_ && !last_mode_.empty()) { spa_mode_text_sensor_->publish_state(last_mode_); }
 
       // If p2/p3 form a valid temperature or mode string, clear any previous error and skip error processing
-      if (temp >= 0 || is_mode_hb) {
+      if (temp >= 0 ||
+        is_mode_hb ||
+        is_filter_cycle_hb ||
+        is_filter_frequency_hb) {
         if (!last_error_code_.empty()) {
           if (error_text_sensor_) error_text_sensor_->publish_state("");
           last_error_code_.clear(); candidate_error.clear(); stable_error = 0;
@@ -579,6 +601,90 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     bool is_mode_string = (c2_char == 'S' && c3_char == 't') ||  // St -> Standard
                           (c2_char == 'E' && c3_char == 'c') ||  // Ec -> Economy
                           (c2_char == 'S' && c3_char == 'L');    // SL -> Sleep
+                          
+    // Detect filter duration strings:
+    // F2 / F4 / F6 / F8 / FC
+    bool is_filter_cycle_string =
+        (c2_char == 'F' &&
+         (digit3 == 2 || digit3 == 4 || digit3 == 6 || digit3 == 8)) ||
+        (c2_char == 'F' && (c3_char == 'C' || c3_char == 'c'));
+
+    // Detect filter frequency strings:
+    // 2C / 1d / 1n
+    bool is_filter_frequency_string =
+        (digit2 == 2 && (c3_char == 'C' || c3_char == 'c')) ||
+        (digit2 == 1 && c3_char == 'd') ||
+        (digit2 == 1 && c3_char == 'n');
+        
+    std::string filter_cycle_str = "";
+    if (is_filter_cycle_string) {
+      if (c3_char == 'C' || c3_char == 'c') {
+        filter_cycle_str = "FC";
+      } else if (digit3 >= 0) {
+        filter_cycle_str = "F" + std::to_string(digit3);
+      }
+    }
+
+    std::string filter_frequency_str = "";
+    if (is_filter_frequency_string) {
+      if (digit2 == 2 && (c3_char == 'C' || c3_char == 'c')) {
+        filter_frequency_str = "2C";
+      } else if (digit2 == 1 && c3_char == 'd') {
+        filter_frequency_str = "1d";
+      } else if (digit2 == 1 && c3_char == 'n') {
+        filter_frequency_str = "1n";
+      }
+    }
+
+    // Publish stable filter duration
+    if (is_filter_cycle_string && !filter_cycle_str.empty()) {
+      if (candidate_filter_cycle_ == filter_cycle_str) {
+        if (stable_filter_cycle_ < 255) stable_filter_cycle_++;
+      } else {
+        candidate_filter_cycle_ = filter_cycle_str;
+        stable_filter_cycle_ = 1;
+      }
+
+      if (stable_filter_cycle_ >= FILTER_STABLE_THRESHOLD &&
+          filter_cycle_str != last_filter_cycle_) {
+        last_filter_cycle_ = filter_cycle_str;
+
+        if (filter_cycle_text_sensor_) {
+          filter_cycle_text_sensor_->publish_state(last_filter_cycle_);
+        }
+
+        ESP_LOGI(TAG, "Filter duration published: %s",
+                 last_filter_cycle_.c_str());
+      }
+    } else {
+      candidate_filter_cycle_.clear();
+      stable_filter_cycle_ = 0;
+    }
+
+    // Publish stable filter frequency
+    if (is_filter_frequency_string && !filter_frequency_str.empty()) {
+      if (candidate_filter_frequency_ == filter_frequency_str) {
+        if (stable_filter_frequency_ < 255) stable_filter_frequency_++;
+      } else {
+        candidate_filter_frequency_ = filter_frequency_str;
+        stable_filter_frequency_ = 1;
+      }
+
+      if (stable_filter_frequency_ >= FILTER_FREQUENCY_STABLE_THRESHOLD &&
+          filter_frequency_str != last_filter_frequency_) {
+        last_filter_frequency_ = filter_frequency_str;
+
+        if (filter_frequency_text_sensor_) {
+          filter_frequency_text_sensor_->publish_state(last_filter_frequency_);
+        }
+
+        ESP_LOGI(TAG, "Filter frequency published: %s",
+                 last_filter_frequency_.c_str());
+      }
+    } else {
+      candidate_filter_frequency_.clear();
+      stable_filter_frequency_ = 0;
+    }
 
     // Treat blank (0x00) OR a mode string as a set-mode indicator for set-temp capture purposes
     bool is_set_indicator = is_zero || is_mode_string;
@@ -643,8 +749,12 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
     // Decode/publish any error-code text (p2/p3) but only after it is stable and looks like an error
     if (error_text_sensor_) {
       // If temperature or mode string — not an error
-      if (temp >= 0 || is_mode_string) {
-        candidate_error.clear(); stable_error = 0;
+      if (temp >= 0 ||
+          is_mode_string ||
+          is_filter_cycle_string ||
+          is_filter_frequency_string) {
+        candidate_error.clear();
+        stable_error = 0;
       } else {
         std::string code = "";
         code.push_back(c2_char != '\0' ? c2_char : '?');
@@ -693,20 +803,46 @@ class HotTubDisplaySensor : public esphome::Component, public esphome::sensor::S
         set_temp_potential = candidate_temp; // raw numeric from display
         ESP_LOGD(TAG, "Zero detected and recent candidate found: set_temp_potential=%d (age=%ums)", set_temp_potential, static_cast<unsigned>(now - last_candidate_temp_time));
       }
-      in_set_mode = true;
-      // Cancel any pending measured-temp publish because set mode is starting
-      pending_measured_temp = -1;
-      pending_measured_since = 0;
-      ESP_LOGD(TAG, "Zero detected (0x00), entering/staying in set mode");
+    bool was_in_set_mode = in_set_mode;
+    in_set_mode = true;
+
+    // Cancel any pending measured-temp publish because set mode is starting
+    pending_measured_temp = -1;
+    pending_measured_since = 0;
+
     } else if (temp_stable && candidate_temp >= 0 && in_set_mode) {
-      // We have observed a stable non-zero temp while already in set mode. Set as potential.
-      int16_t display_candidate = candidate_temp; // raw numeric from display
-      if (set_temp_potential != display_candidate) {
+      int16_t display_candidate = candidate_temp;
+    
+      // If the display suddenly matches the measured water temperature
+      // but is far from the last known setpoint, the topside has likely
+      // returned to the normal temperature display.
+      if (last_measured_temp >= 0 &&
+          last_set_temp >= 0 &&
+          display_candidate == last_measured_temp &&
+          abs(display_candidate - last_set_temp) >= 2) {
+    
+        ESP_LOGI(TAG,
+                 "Ignoring measured-temp display %d while in set mode "
+                 "(last set temp=%d)",
+                 display_candidate,
+                 last_set_temp);
+    
+        in_set_mode = false;
+        set_temp_potential = -1;
+    
+      } else if (set_temp_potential != display_candidate) {
         set_temp_potential = display_candidate;
         last_candidate_temp_time = now;
-        ESP_LOGD(TAG, "Set temp potential updated (transient): %d", set_temp_potential);
+    
+        // Publish the stable set-temperature display immediately so
+        // automation can react before the next TEMP press.
+        if (set_temp_sensor_ != nullptr) {
+          set_temp_sensor_->publish_state(display_candidate);
+        }
+        
+        last_set_temp = display_candidate;
+    
       } else {
-        // refresh timestamp even if same potential
         last_candidate_temp_time = now;
       }
     }

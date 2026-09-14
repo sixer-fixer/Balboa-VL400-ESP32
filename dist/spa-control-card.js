@@ -1,23 +1,30 @@
 /*
-Spa Control Card — a polished Lovelace custom card with in-editor schema and built-in actions.
+Spa Control Card — Lovelace control card for an ESPHome-connected Balboa spa.
 
 Install:
-1. Copy this file to your config/www/ directory (e.g., /config/www/spa-control-card.js)
-2. Add the resource (Configuration → Lovelace Dashboards → Resources):
+1. Copy this file to /config/www/spa-control-card.js
+2. Add it as a Lovelace resource:
    - URL: /local/spa-control-card.js
    - Type: module
-3. Add the card using the UI "Add Card" and search for "Spa Control Card" (the editor will prompt for values), or use raw YAML:
+3. Add the card to a dashboard.
 
-type: 'custom:spa-control-card'
-esp_device: 'esp32-spa'  # recommended
-hot_temp: 103
-cold_temp: 98
+Example:
+
+type: custom:spa-control-card
+device_name: hot_tub
+title: Hot Tub Control
+high_setting: true
+low_setting: true
+show_aux_button: false
+show_mode_buttons: true
 
 Notes:
-- The editor supports explicit entity names for each entity (if automatic detection fails for your installation).
-- If scripts exist (e.g., script.spa_set_hot), the card will attempt to call them for Set Hot/Cold. Otherwise it will press temp buttons until the set temp matches or a safety limit is reached.
-- This card attempts to infer entity IDs from the `esp_device` config by trying a few common patterns. If you see warnings in the UI, fill in the explicit entity id fields in the editor.
-
+- Entity IDs are derived from device_name using the ESPHome naming convention.
+- Set High and Set Low call the corresponding ESPHome button entities.
+- High and Low target temperatures are read from the ESPHome number entities.
+- high_setting and low_setting act as switches to show the Set High / Set Low buttons.
+- show_aux_button controls visibility of the optional Aux / Turbo button.
+- Economy, Standard, and Sleep controls use the spa's topside button sequence.
 */
 
 class SpaControlCard extends HTMLElement {
@@ -59,7 +66,7 @@ class SpaControlCard extends HTMLElement {
             .side-button ha-icon { color: inherit; pointer-events:none; }
 
             /* Circle */
-            .circle { --circle-size: 220px; position:relative; width:var(--circle-size); height:var(--circle-size); border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; background:var(--ha-card-background,var(--paper-card-background-color,var(--card-background-color,#121212))); box-shadow: inset 0 0 0 6px var(--primary-color, #03A9F4); flex-shrink:0; }
+            .circle { --circle-size: 220px; position:relative; width:var(--circle-size); height:var(--circle-size); border-radius:50%; display:flex; flex-direction:column; align-items:center; justify-content:center; background:var(--ha-card-background,var(--paper-card-background-color,var(--card-background-color,#121212))); box-shadow: inset 0 0 0 6px var(--spa-ring-color, var(--primary-color, #03A9F4)); flex-shrink:0; }
 
             /* Mode label inside circle */
             #mode-label { font-size:13px; font-weight:600; letter-spacing:0.06em; color:var(--primary-color,#03A9F4); text-transform:uppercase; height:16px; line-height:16px; margin-bottom:2px; opacity:1; transition:opacity .2s; transform:translateY(9px); }
@@ -126,8 +133,8 @@ class SpaControlCard extends HTMLElement {
                     <div class="set-row" style="margin-top:0;font-size:18px;color:var(--secondary-text-color)"><span class="set-label">Set</span>: <span class="set">—</span></div>
                     <div id="config_msg" style="margin-top:6px;font-size:12px;color:var(--error-color)"></div>
                   </div>
-                  <div class="inner-sensors" style="position:absolute;left:50%;bottom:18px;transform:translateX(-50%);width:48%;display:flex;justify-content:space-between;align-items:flex-end;pointer-events:auto">
-                    <div class="sensor heater" role="img" aria-label="Heater" style="display:flex;align-items:center;justify-content:center;">
+                  <div class="inner-sensors" style="position:absolute;left:50%;bottom:18px;transform:translateX(-50%);width:48%;display:flex;justify-content:center;align-items:flex-end;pointer-events:auto">
+                    <div class="sensor heater" role="img" aria-label="Heater" style="position:absolute;left:50%;transform:translateX(-50%);display:flex;align-items:center;justify-content:center;">
                       <ha-icon id="heater_icon" icon="mdi:fire" style="width:32px;height:32px;color:var(--disabled-text-color,#bdbdbd);transform:translateY(-8px);transition:transform .18s ease,filter .18s ease,color .18s ease"></ha-icon>
                     </div>
                     <div class="sensor pump" role="img" aria-label="Pump" style="display:flex;align-items:center;justify-content:center;">
@@ -158,13 +165,6 @@ class SpaControlCard extends HTMLElement {
         </ha-card>
       `;
       this.appendChild(this._container);
-      // remove any leftover debug overlays from previous versions
-      const oldDbg = this.querySelector('#big .dbg-panel');
-      if (oldDbg && oldDbg.parentNode) oldDbg.parentNode.removeChild(oldDbg);
-      const gOld = document.body.querySelector('.dbg-global');
-      if (gOld && gOld.parentNode) gOld.parentNode.removeChild(gOld);
-      // debug disabled by default
-      this._debug = false;
     }
 
     // optional label override for set prefix
@@ -178,7 +178,6 @@ class SpaControlCard extends HTMLElement {
     if (titleEl) { titleEl.textContent = titleText; titleEl.style.display = titleText ? 'block' : 'none'; }
 
     // Assign deterministic entity IDs based on device name (no guessing)
-    // User specified: set entity = sensor.${device}_set_temp
     if (!this.config.set_entity) this.config.set_entity = `sensor.${this._device_norm}_spa_set_temp`;
     if (!this.config.measured_entity) this.config.measured_entity = `sensor.${this._device_norm}_spa_measured_temp`;
 
@@ -188,9 +187,8 @@ class SpaControlCard extends HTMLElement {
     if (!this.config.pump_entity) this.config.pump_entity = `binary_sensor.${this._device_norm}_spa_pump_status`;
     if (!this.config.light_entity) this.config.light_entity = `binary_sensor.${this._device_norm}_spa_light_status`;
 
-    // GS5xx defaults: single temp button, so both up/down actions target the same entity.
+    // GS5xx uses a single temperature button.
     if (!this.config.temp_up_entity) this.config.temp_up_entity = `button.${this._device_norm}_spa_temp`;
-    if (!this.config.temp_down_entity) this.config.temp_down_entity = `button.${this._device_norm}_spa_temp`;
 
     // sensible defaults for jets, blower, and lights control buttons
     if (!this.config.pump_button_entity) this.config.pump_button_entity = `button.${this._device_norm}_spa_jets`;
@@ -199,11 +197,21 @@ class SpaControlCard extends HTMLElement {
 
     // spa mode sensor (tracks current heating mode: eco / standard / sleep)
     if (!this.config.mode_entity) this.config.mode_entity = `sensor.${this._device_norm}_spa_mode`;
+    
+    if (!this.config.high_target_entity) {
+      this.config.high_target_entity =
+        `number.${this._device_norm}_spa_high_temperature`;
+    }
+    
+    if (!this.config.low_target_entity) {
+      this.config.low_target_entity =
+        `number.${this._device_norm}_spa_low_temperature`;
+    }
 
     // initial update
     this._update();
 
-    // hook up control buttons (idempotent) and hide optional set buttons
+    // Hook up control buttons and show optional Set High / Set Low controls
     const setupBtn = (sel, handler) => {
       const el = this.querySelector(sel);
       if (!el) return;
@@ -231,19 +239,24 @@ class SpaControlCard extends HTMLElement {
 
     const setHighEl = this.querySelector('#set_high_btn');
     const setLowEl = this.querySelector('#set_low_btn');
-    if (setHighEl) setHighEl.style.display = (typeof this.config.high_setting !== 'undefined') ? 'flex' : 'none';
-    if (setLowEl) setLowEl.style.display = (typeof this.config.low_setting !== 'undefined') ? 'flex' : 'none';
+    const auxEl = this.querySelector('#blower_btn');
+    
+    if (setHighEl) setHighEl.style.display = this.config.high_setting === true ? 'flex' : 'none';
+    if (setLowEl) setLowEl.style.display = this.config.low_setting === true ? 'flex' : 'none';
+    if (auxEl) {
+      auxEl.style.visibility = this.config.show_aux_button === true ? 'visible' : 'hidden';
+      auxEl.style.pointerEvents = this.config.show_aux_button === true ? 'auto' : 'none';
+    }
 
     // Initial mode strip visibility handled in _update() because it depends on entity availability.
     const modeStripEl = this.querySelector('#mode-strip');
     if (modeStripEl) modeStripEl.style.display = 'none';
 
-    // layout handled by CSS (no JS cutouts required).
   }
 
   set hass(hass) {
     this._hass = hass;
-    // update and show debug info
+    // update card state
     this._update();
   }
 
@@ -269,9 +282,18 @@ class SpaControlCard extends HTMLElement {
 
     // heater / pump / lights: show simple on/off state and subtle glow when active
     const heaterState = getState(this.config.heater_entity);
+    const circleEl = this.querySelector('.circle');
+    
+    if (circleEl) {
+      circleEl.style.setProperty(
+        '--spa-ring-color',
+        heaterState && heaterState.state === 'on' ? '#d32f2f' : 'var(--primary-color)'
+      );
+    }
+    
     const pumpState = getState(this.config.pump_entity);
     const lightsState = getState(this.config.light_entity);
-
+    
     const heaterIcon = this.querySelector('#heater_icon');
     const pumpIcon = this.querySelector('#pump_icon');
     const lightsIcon = this.querySelector('#lights_icon');
@@ -325,7 +347,7 @@ class SpaControlCard extends HTMLElement {
     }
 
     // reflect busy state in controls (disable while adjusting set points)
-    const controlBlocks = this.querySelectorAll('.side-left, .side-right');
+    const controlBlocks = this.querySelectorAll('.spa-left, .spa-right, #mode-strip');
     if (controlBlocks && controlBlocks.length) {
       controlBlocks.forEach(c => {
         c.style.pointerEvents = this._busy ? 'none' : 'auto';
@@ -334,8 +356,6 @@ class SpaControlCard extends HTMLElement {
       const roundBtns = this.querySelectorAll('#temp_up_btn,#blower_btn');
       roundBtns.forEach(b => b && (b.style.filter = this._busy ? 'grayscale(0.6) opacity(0.8)' : 'none'));
     }
-
-    // layout now purely CSS-driven; nothing to run here
   }
 
   _normalizeDeviceName(name) {
@@ -352,189 +372,79 @@ class SpaControlCard extends HTMLElement {
     console.warn('spa-control-card config:', msg);
   }
 
-  disconnectedCallback() {
-    if (this._resizeHandler) window.removeEventListener('resize', this._resizeHandler);
-  }
-
-  // Position side button stacks relative to the display circle
-  /* Layout handled by CSS now. _updateCutouts retained as a no-op for backward compatibility. */
-  _updateCutouts() { /* no-op; CSS handles positions */ }
-
-  // Note: removed fuzzy/auto inference functions — entities are mapped deterministically now
-
-  // Helpers for button interactions and target-setting behavior
-  _getNumericState(stateObj) {
-    if (!stateObj || stateObj.state === 'unknown' || stateObj.state === 'unavailable') return null;
-    const n = Number(stateObj.state);
-    return Number.isFinite(n) ? n : null;
-  }
-
+  // Helper for timed button sequences
   _sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
 
-  async _pressButtonNTimes(entityId, times, delayMs = 300) {
-    for (let i = 0; i < times; i++) {
-      try {
-        await this._hass.callService('button', 'press', { entity_id: entityId });
-      } catch (e) {
-        console.warn('spa-control-card: press failed', entityId, e);
-      }
-      await this._sleep(delayMs);
-    }
-  }
-
-  _isSingleTempConfig() {
-    return !!this.config && this.config.temp_up_entity === this.config.temp_down_entity;
-  }
-
-  async _readSetTempWithRetries(retries = 4, delayMs = 250) {
-    for (let i = 0; i < retries; i++) {
-      const v = this._getNumericState(this._hass.states[this.config.set_entity]);
-      if (v !== null) return Math.round(v);
-      await this._sleep(delayMs);
-    }
-    return null;
-  }
-
-  async _enterSetModeSingleTemp() {
-    await this._hass.callService('button', 'press', { entity_id: this.config.temp_up_entity });
-    await this._sleep(600);
-    return await this._readSetTempWithRetries();
-  }
-
-  async _detectSingleTempDirection(baseTemp) {
-    let previous = baseTemp;
-    for (let i = 0; i < 3; i++) {
-      await this._hass.callService('button', 'press', { entity_id: this.config.temp_up_entity });
-      await this._sleep(450);
-      const next = await this._readSetTempWithRetries();
-      if (next === null || previous === null) continue;
-      const delta = Math.round(next - previous);
-      if (delta !== 0) {
-        return { direction: Math.sign(delta), current: next };
-      }
-      previous = next;
-    }
-    return { direction: 0, current: previous };
-  }
-
-  async _flipSingleTempDirection() {
-    // User-observed behavior: after ~4s out of set mode, re-entering set mode flips direction.
-    await this._sleep(4500);
-    return await this._enterSetModeSingleTemp();
-  }
-
-  async _setToTargetSingleTemp(target) {
-    let current = await this._enterSetModeSingleTemp();
-    if (current === null) return false;
-    if (current === Math.round(target)) return true;
-
-    const maxCycles = 8;
-    const maxPresses = 140;
-    let presses = 0;
-
-    for (let cycle = 0; cycle < maxCycles; cycle++) {
-      const desiredDirection = Math.sign(Math.round(target - current));
-      if (desiredDirection === 0) return true;
-
-      const detected = await this._detectSingleTempDirection(current);
-      if (detected.current !== null) current = detected.current;
-
-      if (detected.direction === 0) {
-        const retry = await this._enterSetModeSingleTemp();
-        if (retry !== null) current = retry;
-        continue;
-      }
-
-      if (detected.direction !== desiredDirection) {
-        const flipped = await this._flipSingleTempDirection();
-        if (flipped !== null) current = flipped;
-        continue;
-      }
-
-      let noChangeCount = 0;
-      while (presses < maxPresses) {
-        if (Math.round(current) === Math.round(target)) return true;
-
-        await this._hass.callService('button', 'press', { entity_id: this.config.temp_up_entity });
-        presses++;
-        await this._sleep(350);
-
-        const next = await this._readSetTempWithRetries();
-        if (next === null) continue;
-
-        const step = Math.round(next - current);
-        if (step === 0) {
-          noChangeCount++;
-          if (noChangeCount >= 2) break;
-          continue;
-        }
-
-        noChangeCount = 0;
-        current = next;
-
-        if (Math.round(current) === Math.round(target)) return true;
-        if (Math.sign(step) !== desiredDirection) {
-          // Likely hit max/min rollover; leave loop and perform direction flip cycle.
-          break;
-        }
-      }
-
-      const flipped = await this._flipSingleTempDirection();
-      if (flipped !== null) current = flipped;
-    }
-
-    return Math.round(current) === Math.round(target);
-  }
-
-  async _setToTarget(target) {
+  async _onSetHigh() {
     if (this._busy) return;
     this._busy = true;
     this._update();
+
     try {
-      if (this._isSingleTempConfig()) {
-        const ok = await this._setToTargetSingleTemp(target);
-        if (!ok) this._showConfigMessage('Unable to reach desired set temperature');
-        return;
-      }
+      await this._hass.callService('button', 'press', {
+        entity_id: `button.${this._device_norm}_set_spa_high`
+      });
 
-      const maxAttempts = 6;
-      const pressDelay = 280;
-      const verifyDelay = 500;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const cur = this._getNumericState(this._hass.states[this.config.set_entity]);
-        if (cur === null) break;
-        const diff = Math.round(target - cur);
-        if (diff === 0) return;
-        const times = Math.abs(diff);
-        const entityToPress = diff > 0 ? this.config.temp_up_entity : this.config.temp_down_entity;
-        await this._pressButtonNTimes(entityToPress, times, pressDelay);
-        await this._sleep(verifyDelay);
-      }
+      // Stay busy until ESPHome reports the high setpoint.
+      // 45-second timeout prevents the card getting stuck dimmed.
+      const highState = this._hass.states[this.config.high_target_entity];
+      const target = highState ? Number(highState.state) : NaN;
+      const timeout = Date.now() + 45000;
 
-      const final = this._getNumericState(this._hass.states[this.config.set_entity]);
-      if (final === null || Math.round(final) !== Math.round(target)) {
-        this._showConfigMessage('Unable to reach desired set temperature');
+      while (Date.now() < timeout) {
+        const state = this._hass.states[this.config.set_entity];
+        const temp = state ? Number(state.state) : NaN;
+
+        if (Number.isFinite(temp) &&
+            Number.isFinite(target) &&
+            Math.abs(temp - target) <= 0.2) {
+          break;
+        }
+
+        await this._sleep(500);
       }
-    } finally {
-      this._busy = false;
-      this._update();
+    } catch (e) {
+      console.warn('spa-control-card: Set High failed', e);
     }
-  }
 
-  async _onSetHigh() {
-    if (!this.config || typeof this.config.high_setting === 'undefined') return;
-    const target = Number(this.config.high_setting);
-    if (!Number.isFinite(target)) { this._showConfigMessage('Invalid high_setting'); return; }
-    await this._setToTarget(target);
+    this._busy = false;
+    this._update();
   }
 
   async _onSetLow() {
-    if (!this.config || typeof this.config.low_setting === 'undefined') return;
-    const target = Number(this.config.low_setting);
-    if (!Number.isFinite(target)) { this._showConfigMessage('Invalid low_setting'); return; }
-    await this._setToTarget(target);
+    if (this._busy) return;
+    this._busy = true;
+    this._update();
+
+    try {
+      await this._hass.callService('button', 'press', {
+        entity_id: `button.${this._device_norm}_set_spa_low`
+      });
+
+      const lowState = this._hass.states[this.config.low_target_entity];
+      const target = lowState ? Number(lowState.state) : NaN;
+      const timeout = Date.now() + 45000;
+
+      while (Date.now() < timeout) {
+        const state = this._hass.states[this.config.set_entity];
+        const temp = state ? Number(state.state) : NaN;
+
+        if (Number.isFinite(temp) &&
+            Number.isFinite(target) &&
+            Math.abs(temp - target) <= 0.2) {
+          break;
+        }
+
+        await this._sleep(500);
+      }
+    } catch (e) {
+      console.warn('spa-control-card: Set Low failed', e);
+    }
+
+    this._busy = false;
+    this._update();
   }
 
   async _onTempUp() {
@@ -611,12 +521,12 @@ class SpaControlCard extends HTMLElement {
     return 4;
   }
 
-  /* Lovelace editor integration: provide a simple schema-based editor using <ha-form>
-     The editor will ask for:
+  /*
+     Lovelace editor configuration:
        - device_name (required)
        - title (optional)
-       - high_setting (optional)
-       - low_setting (optional)
+       - high_setting / low_setting control Set High / Set Low visibility
+       - show_mode_buttons controls Economy / Standard / Sleep visibility
   */
   static async getConfigElement() {
     if (!customElements.get('spa-control-card-editor')) {
@@ -635,12 +545,16 @@ class SpaControlCard extends HTMLElement {
           if (dev && document.activeElement !== dev && dev.value !== (this._config.device_name || '')) dev.value = this._config.device_name || '';
           const title = this.querySelector('#title');
           if (title && document.activeElement !== title && title.value !== (this._config.title || '')) title.value = this._config.title || '';
-          const high = this.querySelector('#high_setting');
-          const highVal = typeof this._config.high_setting !== 'undefined' ? String(this._config.high_setting) : '';
-          if (high && document.activeElement !== high && high.value !== highVal) high.value = highVal;
-          const low = this.querySelector('#low_setting');
-          const lowVal = typeof this._config.low_setting !== 'undefined' ? String(this._config.low_setting) : '';
-          if (low && document.activeElement !== low && low.value !== lowVal) low.value = lowVal;
+          
+          const highToggle = this.querySelector('#high_setting');
+          if (highToggle) highToggle.checked = this._config.high_setting === true;
+
+          const lowToggle = this.querySelector('#low_setting');
+          if (lowToggle) lowToggle.checked = this._config.low_setting === true;
+
+          const auxToggle = this.querySelector('#show_aux_button');
+          if (auxToggle) auxToggle.checked = this._config.show_aux_button === true;
+
           const modeToggle = this.querySelector('#show_mode_buttons');
           if (modeToggle) modeToggle.checked = this._config.show_mode_buttons !== false;
         }
@@ -678,8 +592,53 @@ class SpaControlCard extends HTMLElement {
 
           const devField = makeField('Device name (required)', 'device_name', 'text', true);
           const titleField = makeField('Title (optional)', 'title', 'text', false);
-          const highField = makeField('High setting (optional)', 'high_setting', 'number', false);
-          const lowField = makeField('Low setting (optional)', 'low_setting', 'number', false);
+          const highToggleWrapper = document.createElement('div');
+          highToggleWrapper.style.display = 'flex';
+          highToggleWrapper.style.alignItems = 'center';
+          highToggleWrapper.style.gap = '8px';
+
+          const highToggleInput = document.createElement('input');
+          highToggleInput.id = 'high_setting';
+          highToggleInput.type = 'checkbox';
+
+          const highToggleLabel = document.createElement('label');
+          highToggleLabel.htmlFor = 'high_setting';
+          highToggleLabel.textContent = 'Show Set High button';
+
+          highToggleWrapper.appendChild(highToggleInput);
+          highToggleWrapper.appendChild(highToggleLabel);
+
+          const lowToggleWrapper = document.createElement('div');
+          lowToggleWrapper.style.display = 'flex';
+          lowToggleWrapper.style.alignItems = 'center';
+          lowToggleWrapper.style.gap = '8px';
+
+          const lowToggleInput = document.createElement('input');
+          lowToggleInput.id = 'low_setting';
+          lowToggleInput.type = 'checkbox';
+
+          const lowToggleLabel = document.createElement('label');
+          lowToggleLabel.htmlFor = 'low_setting';
+          lowToggleLabel.textContent = 'Show Set Low button';
+
+          lowToggleWrapper.appendChild(lowToggleInput);
+          lowToggleWrapper.appendChild(lowToggleLabel);
+
+          const auxToggleWrapper = document.createElement('div');
+          auxToggleWrapper.style.display = 'flex';
+          auxToggleWrapper.style.alignItems = 'center';
+          auxToggleWrapper.style.gap = '8px';
+
+          const auxToggleInput = document.createElement('input');
+          auxToggleInput.id = 'show_aux_button';
+          auxToggleInput.type = 'checkbox';
+
+          const auxToggleLabel = document.createElement('label');
+          auxToggleLabel.htmlFor = 'show_aux_button';
+          auxToggleLabel.textContent = 'Show Aux / Turbo button';
+
+          auxToggleWrapper.appendChild(auxToggleInput);
+          auxToggleWrapper.appendChild(auxToggleLabel);
 
           // Toggle: show/hide mode buttons
           const modeToggleWrapper = document.createElement('div');
@@ -690,28 +649,27 @@ class SpaControlCard extends HTMLElement {
           const modeToggleInput = document.createElement('input');
           modeToggleInput.id = 'show_mode_buttons';
           modeToggleInput.type = 'checkbox';
-          modeToggleInput.style.width = '18px';
-          modeToggleInput.style.height = '18px';
           modeToggleInput.style.cursor = 'pointer';
           const modeToggleLabel = document.createElement('label');
           modeToggleLabel.htmlFor = 'show_mode_buttons';
           modeToggleLabel.textContent = 'Show Economy / Standard / Sleep mode buttons';
-          modeToggleLabel.style.fontSize = '13px';
           modeToggleLabel.style.cursor = 'pointer';
           modeToggleWrapper.appendChild(modeToggleInput);
           modeToggleWrapper.appendChild(modeToggleLabel);
 
           container.appendChild(devField.wrapper);
           container.appendChild(titleField.wrapper);
-          container.appendChild(highField.wrapper);
-          container.appendChild(lowField.wrapper);
+          container.appendChild(highToggleWrapper);
+          container.appendChild(lowToggleWrapper);
+          container.appendChild(auxToggleWrapper);
           container.appendChild(modeToggleWrapper);
 
           // populate values
           devField.input.value = this._config.device_name || '';
           titleField.input.value = this._config.title || '';
-          highField.input.value = typeof this._config.high_setting !== 'undefined' ? this._config.high_setting : '';
-          lowField.input.value = typeof this._config.low_setting !== 'undefined' ? this._config.low_setting : '';
+          highToggleInput.checked = this._config.high_setting === true;
+          lowToggleInput.checked = this._config.low_setting === true;
+          auxToggleInput.checked = this._config.show_aux_button === true;
           modeToggleInput.checked = this._config.show_mode_buttons !== false;
 
           // dispatch change events (debounced)
@@ -722,8 +680,9 @@ class SpaControlCard extends HTMLElement {
               device_name: devField.input.value.trim(),
               // preserve spaces the user types in the title field; only convert empty -> undefined
               title: titleField.input.value !== '' ? titleField.input.value : undefined,
-              high_setting: highField.input.value !== '' ? Number(highField.input.value) : undefined,
-              low_setting: lowField.input.value !== '' ? Number(lowField.input.value) : undefined,
+              high_setting: highToggleInput.checked,
+              low_setting: lowToggleInput.checked,
+              show_aux_button: auxToggleInput.checked,
               show_mode_buttons: modeToggleInput.checked,
             };
             this.dispatchEvent(new CustomEvent('config-changed', { detail: { config: cfg } }));
@@ -733,9 +692,13 @@ class SpaControlCard extends HTMLElement {
             timeout = setTimeout(dispatch, 250);
           };
 
-          [devField.input, titleField.input, highField.input, lowField.input].forEach(i => {
+          [devField.input, titleField.input].forEach(i => {
             i.addEventListener('input', schedule);
           });
+
+          highToggleInput.addEventListener('change', dispatch);
+          lowToggleInput.addEventListener('change', dispatch);
+          auxToggleInput.addEventListener('change', dispatch);
           modeToggleInput.addEventListener('change', dispatch);
 
           this.appendChild(container);
@@ -747,7 +710,7 @@ class SpaControlCard extends HTMLElement {
   }
 
   static getStubConfig() {
-    return { type: 'custom:spa-control-card', device_name: '', title: '', high_setting: undefined, low_setting: undefined, show_mode_buttons: true };
+    return { type: 'custom:spa-control-card', device_name: '', title: '', high_setting: undefined, low_setting: undefined, show_aux_button: false, show_mode_buttons: true };
   }
 }
 

@@ -27,6 +27,15 @@ api:
   encryption:
     key: !secret api_key
 
+  actions:
+    - action: set_spa_target_temperature
+      variables:
+        target_temp: float
+      then:
+        - script.execute:
+            id: set_spa_target_temp
+            target_temp: !lambda 'return target_temp;'
+
 ota:
   - platform: esphome
     password: !secret ota_password
@@ -34,6 +43,9 @@ ota:
     id: ota_http
 
 wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  
   # Enable fallback hotspot (captive portal) in case wifi connection fails
   ap:
     ssid: "Esp32-Spa Fallback Hotspot"
@@ -42,6 +54,7 @@ wifi:
 captive_portal:
 
 logger:
+  level: INFO
 
 http_request:
   useragent: esphome/balboa-gs5xx
@@ -67,10 +80,25 @@ globals:
     restore_value: false
     initial_value: '""'
 
-  - id: filter_cycle_target
+  - id: filter_duration_target
     type: std::string
     restore_value: false
     initial_value: '""'
+
+  - id: filter_frequency_target
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+
+  - id: spa_temp_previous
+    type: float
+    restore_value: false
+    initial_value: '0.0'
+
+  - id: spa_temp_direction
+    type: int
+    restore_value: false
+    initial_value: '0'
 
 external_components:
   - source: esp32-spa
@@ -101,8 +129,8 @@ text_sensor:
   - platform: inputs
     parent_id: display_handler
     type: filter_cycle
-    id: spa_filter_cycle_state
-    name: "Spa Filter Cycle State"
+    id: spa_filter_duration_state
+    name: "Spa Filter Duration State"
     on_value:
       - if:
           condition:
@@ -110,10 +138,27 @@ text_sensor:
               script.is_running: filter_cycle_worker
           then:
             - lambda: |-
-                if (x == "F1" || x == "F2" || x == "F3" || x == "F4" ||
-                    x == "F5" || x == "F6" || x == "F7" || x == "F8") {
+                if (x == "F2" || x == "F4" || x == "F6" ||
+                    x == "F8" || x == "FC") {
                   id(spa_filter_cycle).publish_state(x);
-                  id(filter_cycle_target) = x;
+                  id(filter_duration_target) = x;
+                }
+
+  - platform: inputs
+    parent_id: display_handler
+    type: filter_frequency
+    id: spa_filter_frequency_state
+    name: "Spa Filter Frequency State"
+    on_value:
+      - if:
+          condition:
+            not:
+              script.is_running: filter_cycle_worker
+          then:
+            - lambda: |-
+                if (x == "2C" || x == "1d" || x == "1n") {
+                  id(spa_filter_frequency).publish_state(x);
+                  id(filter_frequency_target) = x;
                 }
 
 # ===== HOT TUB DISPLAY INPUTS =====
@@ -160,22 +205,26 @@ number:
     name: "Spa High Temperature"
     id: spa_high_target_temp
     icon: "mdi:thermometer-high"
-    min_value: 15
-    max_value: 105
-    step: 1
-    initial_value: 37
-    restore_value: true
+    unit_of_measurement: "°C"
+    device_class: temperature
+    min_value: 26.7
+    max_value: 40
+    step: 0.1
+    initial_value: 40
+    restore_value: false
     optimistic: true
 
   - platform: template
     name: "Spa Low Temperature"
     id: spa_low_target_temp
     icon: "mdi:thermometer-low"
-    min_value: 15
-    max_value: 105
-    step: 1
-    initial_value: 26
-    restore_value: true
+    unit_of_measurement: "°C"
+    device_class: temperature
+    min_value: 26.7
+    max_value: 40
+    step: 0.1
+    initial_value: 26.7
+    restore_value: false
     optimistic: true
 
 select:
@@ -219,22 +268,34 @@ select:
     id: spa_filter_cycle
     icon: "mdi:filter"
     options:
-      - "F1"
       - "F2"
-      - "F3"
       - "F4"
-      - "F5"
       - "F6"
-      - "F7"
       - "F8"
+      - "FC"
     optimistic: false
 
     set_action:
-      # Store the requested filter cycle and immediately show it
-      # in Home Assistant/Homey.
       - lambda: |-
-          id(filter_cycle_target) = x;
+          id(filter_duration_target) = x;
           id(spa_filter_cycle).publish_state(x);
+
+      - script.execute: filter_cycle_worker
+
+  - platform: template
+    name: "Spa Filter Frequency"
+    id: spa_filter_frequency
+    icon: "mdi:calendar-clock"
+    options:
+      - "2C"
+      - "1d"
+      - "1n"
+    optimistic: false
+
+    set_action:
+      - lambda: |-
+          id(filter_frequency_target) = x;
+          id(spa_filter_frequency).publish_state(x);
 
       - script.execute: filter_cycle_worker
 
@@ -293,79 +354,124 @@ script:
       - output.turn_off: spa_lights_out
       - delay: 1000ms
 
-  # Read the current filter cycle without changing it.
+  # Read the current filter-cycle duration without changing it.
   - id: filter_cycle_read
     mode: single
     then:
-      # TEMP
+      # TEMP: begin programming sequence.
       - output.turn_on: spa_temp_out
       - delay: 100ms
       - output.turn_off: spa_temp_out
       - delay: 500ms
 
-      # JETS: enter filter-cycle menu.
+      # JETS: enter filter duration menu.
       - output.turn_on: spa_jets_out
       - delay: 100ms
       - output.turn_off: spa_jets_out
       - delay: 1500ms
 
-      # JETS: leave filter-cycle menu without changing the value.
+      # At this point the display shows:
+      # F2 / F4 / F6 / F8 / FC
+
+      # JETS: advance to filter frequency menu.
+      - output.turn_on: spa_jets_out
+      - delay: 100ms
+      - output.turn_off: spa_jets_out
+      - delay: 1000ms
+
+      # At this point the display shows:
+      # 2C / 1d / 1n
+
+      # JETS: exit programming.
       - output.turn_on: spa_jets_out
       - delay: 100ms
       - output.turn_off: spa_jets_out
       - delay: 500ms
 
-  # Enter the filter menu, move to the requested F1-F8 setting,
+  # Enter the filter menu, set the requested duration and frequency,
   # then leave the menu with JETS.
   - id: filter_cycle_worker
     mode: single
     then:
-      # TEMP
+      # Do nothing if either target is not known yet.
+      - if:
+          condition:
+            lambda: |-
+              return id(filter_duration_target).empty() ||
+                     id(filter_frequency_target).empty();
+          then:
+            - logger.log: "Filter worker skipped: duration/frequency target not initialized"
+            - script.stop: filter_cycle_worker
+
+      # TEMP: begin programming sequence.
       - output.turn_on: spa_temp_out
       - delay: 100ms
       - output.turn_off: spa_temp_out
       - delay: 500ms
 
-      # JETS: enter filter-cycle menu.
+      # JETS: enter filter duration menu.
       - output.turn_on: spa_jets_out
       - delay: 100ms
       - output.turn_off: spa_jets_out
       - delay: 1500ms
 
-      # Step through F1-F8 until the requested value is displayed.
+      # Cycle duration:
+      # F2 -> F4 -> F6 -> F8 -> FC
       - repeat:
-          count: 8
+          count: 5
           then:
             - if:
                 condition:
                   lambda: |-
-                    return id(spa_filter_cycle_state).state != id(filter_cycle_target);
+                    return id(spa_filter_duration_state).state !=
+                           id(filter_duration_target);
                 then:
                   - script.execute: filter_cycle_step
                   - script.wait: filter_cycle_step
 
-      # JETS: leave filter-cycle menu.
+      # JETS: advance to frequency menu.
+      - output.turn_on: spa_jets_out
+      - delay: 100ms
+      - output.turn_off: spa_jets_out
+      - delay: 1000ms
+
+      # Cycle frequency:
+      # 2C -> 1d -> 1n
+      - repeat:
+          count: 3
+          then:
+            - if:
+                condition:
+                  lambda: |-
+                    return id(spa_filter_frequency_state).state !=
+                           id(filter_frequency_target);
+                then:
+                  - script.execute: filter_cycle_step
+                  - script.wait: filter_cycle_step
+
+      # JETS: exit programming.
       - output.turn_on: spa_jets_out
       - delay: 100ms
       - output.turn_off: spa_jets_out
       - delay: 500ms
 
-      # If the requested value was not reached, restore the selector
-      # to the value actually observed on the spa display.
-      - if:
-          condition:
-            lambda: |-
-              return id(spa_filter_cycle_state).state != id(filter_cycle_target);
-          then:
-            - lambda: |-
-                const auto filter = id(spa_filter_cycle_state).state;
-                if (filter == "F1" || filter == "F2" ||
-                    filter == "F3" || filter == "F4" ||
-                    filter == "F5" || filter == "F6" ||
-                    filter == "F7" || filter == "F8") {
-                  id(spa_filter_cycle).publish_state(filter);
-                  id(filter_cycle_target) = filter;
-                }
+      # Restore both selectors to the actual observed values.
+      - lambda: |-
+          const auto duration = id(spa_filter_duration_state).state;
+          const auto frequency = id(spa_filter_frequency_state).state;
+
+          if (duration == "F2" || duration == "F4" ||
+              duration == "F6" || duration == "F8" ||
+              duration == "FC") {
+            id(spa_filter_cycle).publish_state(duration);
+            id(filter_duration_target) = duration;
+          }
+
+          if (frequency == "2C" || frequency == "1d" ||
+              frequency == "1n") {
+            id(spa_filter_frequency).publish_state(frequency);
+            id(filter_frequency_target) = frequency;
+          }
 
   # One physical TEMP press while inside the filter-cycle menu.
   - id: filter_cycle_step
@@ -381,16 +487,90 @@ script:
     parameters:
       target_temp: float
     then:
+      # Nothing to do if we're already at the requested temperature.
+      - if:
+          condition:
+            lambda: |-
+              return abs(id(spa_set_temp).state - target_temp) <= 0.5f;
+          then:
+            - script.stop: set_spa_target_temp
+
+      # Remember which direction we actually want to travel.
+      - lambda: |-
+          id(spa_temp_direction) =
+            target_temp > id(spa_set_temp).state ? 1 : -1;
+
+      # First TEMP press brings up the set-temperature display.
+      - button.press: btn_temp
+      - delay: 700ms
+
+      # Remember the starting setpoint.
+      - lambda: |-
+          id(spa_temp_previous) = id(spa_set_temp).state;
+
+      # Second press gives us the first real movement.
+      - button.press: btn_temp
+
+      # Wait until the decoder sees the setpoint change.
+      - wait_until:
+          condition:
+            lambda: |-
+              return abs(id(spa_set_temp).state -
+                         id(spa_temp_previous)) > 0.2f;
+          timeout: 2500ms
+
+      # Did that first movement go the wrong way?
+      - if:
+          condition:
+            lambda: |-
+              const float change =
+                id(spa_set_temp).state - id(spa_temp_previous);
+
+              return (id(spa_temp_direction) > 0 && change < 0) ||
+                     (id(spa_temp_direction) < 0 && change > 0);
+          then:
+            # Stop touching TEMP long enough for the Balboa
+            # to return to the normal current-temperature display.
+            - logger.log:
+                level: INFO
+                format: "TEMP moved wrong direction; waiting for reversal"
+            - delay: 5000ms
+
+            # Start a fresh adjustment session.
+            - button.press: btn_temp
+            - delay: 700ms
+
+            - lambda: |-
+                id(spa_temp_previous) = id(spa_set_temp).state;
+
+            - button.press: btn_temp
+
+            - wait_until:
+                condition:
+                  lambda: |-
+                    return abs(id(spa_set_temp).state -
+                               id(spa_temp_previous)) > 0.2f;
+                timeout: 2500ms
+
+      # Now step toward the target, waiting for feedback
+      # after every individual TEMP press.
       - repeat:
           count: 30
           then:
             - if:
                 condition:
                   lambda: |-
-                    return abs(id(spa_set_temp).state - target_temp) > 0.5f;
+                    return abs(id(spa_set_temp).state -
+                               target_temp) > 0.5f;
                 then:
-                  - button.press: btn_temp
-                  - delay: 800ms
+                  - lambda: |-
+                      id(spa_temp_previous) =
+                        id(spa_set_temp).state;
+
+                  - output.turn_on: spa_temp_out
+                  - delay: 100ms
+                  - output.turn_off: spa_temp_out
+                  - delay: 700ms
 
 # ===== BUTTONS (GPIO outputs) =====
 output:
@@ -417,7 +597,9 @@ button:
     name: "Spa Temp"
     icon: "mdi:thermometer"
     on_press:
-      - logger.log: "Button pressed: TEMP"
+      - logger.log:
+          level: INFO
+          format: "Button pressed: TEMP"
       - output.turn_on: spa_temp_out
       - delay: 100ms
       - output.turn_off: spa_temp_out
@@ -456,8 +638,7 @@ button:
       - script.execute:
           id: set_spa_target_temp
           target_temp: !lambda |-
-            const float target = id(spa_high_target_temp).state;
-            return id(display_is_fahrenheit) ? (target - 32.0f) * 5.0f / 9.0f : target;
+            return id(spa_high_target_temp).state;
 
   - platform: template
     name: "Set Spa Low"
@@ -466,5 +647,8 @@ button:
       - script.execute:
           id: set_spa_target_temp
           target_temp: !lambda |-
-            const float target = id(spa_low_target_temp).state;
-            return id(display_is_fahrenheit) ? (target - 32.0f) * 5.0f / 9.0f : target;
+            return id(spa_low_target_temp).state;
+
+  - platform: restart
+    name: "ESP Restart"
+    entity_category: diagnostic
