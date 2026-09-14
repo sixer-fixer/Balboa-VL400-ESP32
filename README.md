@@ -243,6 +243,14 @@ Logic analyzer screenshot:
 
 ## Images
 
+### VL400 / Beachcomber Installation
+
+The ESP32 interface installed in a 2019 Beachcomber 654 LEEP:
+
+![Beachcomber 654 LEEP ESP32 Installation](docs/beachcomber-esp32.jpg)
+
+
+### Original Project Images
 
 ![PCB](docs/pcb.jpg)
 
@@ -259,6 +267,8 @@ A companion Homebridge plugin is available for exposing the ESP32/Balboa integra
 [homebridge-balboa-esp32](https://github.com/sixer-fixer/homebridge-balboa-esp32)
 
 The plugin connects to the ESPHome device and exposes the hot tub as a grouped Apple Home accessory, including temperature control, heater status, jets, and lighting.
+
+![Apple Home Integration](docs/homebridge-esp32-spa.jpg)
 
 ---
 
